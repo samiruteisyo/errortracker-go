@@ -96,6 +96,30 @@ func isSDKFrame(function string) bool {
 	return strings.HasPrefix(function, sdkPkg+".")
 }
 
+// logPlumbing is the standard library's logging machinery, which sits between a
+// caller and a slog.Handler.
+//
+// SlogHandler.Handle captures the stack where it runs, so above this package's
+// own frames sit log/slog's -- and dropping only ours leaves
+// "log/slog.(*Logger).log" as the innermost frame of EVERY captured record. The
+// culprit then reads as the standard library on every issue and nothing is
+// marked in_app, which removes the entire reason to install the slog handler:
+// getting real frames onto a handled error.
+//
+// Matched by package path, like isSDKFrame, and applied only to LEADING frames
+// so a caller that legitimately appears beneath its own logging helper is never
+// deleted from the middle of a stack.
+var logPlumbing = []string{"log/slog.", "log."}
+
+func isLogPlumbingFrame(function string) bool {
+	for _, p := range logPlumbing {
+		if strings.HasPrefix(function, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildChain unwraps an error into the chain the server expects: INNERMOST
 // FIRST.
 //
@@ -172,7 +196,9 @@ func captureFrames(skip int, appRoots []string) []frame {
 		// "/errortracker." would also delete a caller's frames if they happened
 		// to have a package of that name -- which is not hypothetical, since
 		// the natural thing to call a wrapper around this SDK is errortracker.
-		if !isSDKFrame(f.Function) {
+		// Leading-only: once a real frame has been emitted, everything below it
+		// is the caller's genuine ancestry and is kept as-is.
+		if !isSDKFrame(f.Function) && !(len(out) == 0 && isLogPlumbingFrame(f.Function)) {
 			out = append(out, newFrame(f.File, f.Function, f.Line, appRoots))
 		}
 		if !more {
